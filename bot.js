@@ -48,7 +48,7 @@ const i18n = {
         check_sub_btn: "Check Subscription",
         sub_thanks: "Thanks for subscribing!",
         sub_fail: "You are not subscribed yet.",
-        profile_text: "ID: {id}\nPremium Status: Active\nInvited Friends: {refCount}",
+        profile_text: "ID: {id}\nPremium Status: Active\nInvited Friends: {refCount}\nTotal Data Processed: {randomData} GB",
         invite_text: "Invite friends to support the bot!\nYour link: https://t.me/{botUsername}?start={id}",
         downloading: "⏳ Downloading video...",
         download_success: "✅ Download complete!",
@@ -66,7 +66,7 @@ const i18n = {
         check_sub_btn: "Проверить подписку",
         sub_thanks: "Спасибо за подписку!",
         sub_fail: "Вы еще не подписались.",
-        profile_text: "ID: {id}\nПремиум Статус: Активен\nПриглашенные друзья: {refCount}",
+        profile_text: "ID: {id}\nПремиум Статус: Активен\nПриглашенные друзья: {refCount}\nВсего обработано данных: {randomData} ГБ",
         invite_text: "Приглашайте друзей, чтобы поддержать бота!\nВаша ссылка: https://t.me/{botUsername}?start={id}",
         downloading: "⏳ Загрузка видео...",
         download_success: "✅ Загрузка завершена!",
@@ -84,7 +84,7 @@ const i18n = {
         check_sub_btn: "Ստուգել բաժանորդագրությունը",
         sub_thanks: "Շնորհակալություն բաժանորդագրվելու համար:",
         sub_fail: "Դուք դեռ բաժանորդագրված չեք:",
-        profile_text: "ID: {id}\nՊրեմիում կարգավիճակ: Ակտիվ\nՀրավիրված ընկերներ: {refCount}",
+        profile_text: "ID: {id}\nՊրեմիում կարգավիճակ: Ակտիվ\nՀրավիրված ընկերներ: {refCount}\nԸնդհանուր մշակված տվյալները: {randomData} ԳԲ",
         invite_text: "Հրավիրեք ընկերներին աջակցելու բոտին:\nՁեր հղումը՝ https://t.me/{botUsername}?start={id}",
         downloading: "⏳ Տեսանյութի ներբեռնում...",
         download_success: "✅ Ներբեռնումը ավարտված է",
@@ -203,24 +203,18 @@ bot.action(/setlang_(.+)/, async (ctx) => {
     await ctx.reply(t.mainMenu, getKeyboard(lang));
 });
 
-// Check subscription function
-async function isSubscribed(ctx, userId) {
-    try {
-        const member = await ctx.telegram.getChatMember('@barnichok', userId);
-        return ['creator', 'administrator', 'member', 'restricted'].includes(member.status);
-    } catch (e) {
-        // If bot is not an admin, it will fail, assume false for now
-        return false;
-    }
-}
-
 // Button actions from keyboard
 bot.hears(['👤 Profile', '👤 Профиль', '👤 Պրոֆիլ'], (ctx) => {
     if (!ctx.user || !ctx.user.lang) return;
     const t = i18n[ctx.user.lang];
+
+    // Generate a random number between 500 and 2000 for a cool stat
+    const randomData = Math.floor(Math.random() * (2000 - 500 + 1)) + 500;
+
     const text = t.profile_text
         .replace('{id}', ctx.userId)
-        .replace('{refCount}', ctx.user.referralCount);
+        .replace('{refCount}', ctx.user.referralCount)
+        .replace('{randomData}', randomData);
     ctx.reply(text);
 });
 
@@ -258,23 +252,18 @@ bot.on('text', async (ctx, next) => {
 
         const t = i18n[user.lang];
 
-        const subbed = await isSubscribed(ctx, ctx.userId);
-        if (!subbed) {
-            const subKeyboard = Markup.inlineKeyboard([
-                [Markup.button.url(t.subscribe_btn, 'https://t.me/barnichok')],
-                [Markup.button.callback(t.check_sub_btn, 'check_sub')]
-            ]);
-            return ctx.reply(t.subscribe_msg, subKeyboard);
-        }
-
         const urlMatch = text.match(/(https?:\/\/[^\s]+)/);
         if (!urlMatch) return;
         const url = urlMatch[0];
 
-        // Cache URL to avoid callback_data 64-byte limit
+        // Cache URL and message ID to avoid callback_data 64-byte limit
+        // and to delete original message later
         const linkId = Math.random().toString(36).substring(2, 10);
         if (!globalDB.links) globalDB.links = {};
-        globalDB.links[linkId] = url;
+        globalDB.links[linkId] = {
+            url: url,
+            messageId: ctx.message.message_id
+        };
         saveDB();
 
         // Format Selection
@@ -284,21 +273,6 @@ bot.on('text', async (ctx, next) => {
         return ctx.reply("Select format:", formatKeyboard);
     } else {
         return next();
-    }
-});
-
-bot.action('check_sub', async (ctx) => {
-    const user = ctx.user;
-    if (!user || !user.lang) return;
-    const t = i18n[user.lang];
-
-    const subbed = await isSubscribed(ctx, ctx.userId);
-    if (subbed) {
-        await ctx.answerCbQuery(t.sub_thanks);
-        await ctx.deleteMessage();
-        await ctx.reply(t.mainMenu, getKeyboard(user.lang));
-    } else {
-        await ctx.answerCbQuery(t.sub_fail, { show_alert: true });
     }
 });
 
@@ -350,11 +324,14 @@ bot.on('inline_query', async (ctx) => {
 bot.action(/dl_(video|audio)\|(.+)/, async (ctx) => {
     const type = ctx.match[1];
     const linkId = ctx.match[2];
-    const url = globalDB.links ? globalDB.links[linkId] : null;
+    const linkData = globalDB.links ? globalDB.links[linkId] : null;
 
-    if (!url) {
+    if (!linkData || !linkData.url) {
         return ctx.answerCbQuery("❌ Link expired or invalid.", { show_alert: true });
     }
+
+    const url = linkData.url;
+    const originalMessageId = linkData.messageId;
 
     const user = ctx.user;
     if (!user || !user.lang) return;
@@ -368,6 +345,28 @@ bot.action(/dl_(video|audio)\|(.+)/, async (ctx) => {
     const outputTemplate = path.join(tempDir, '%(title)s.%(ext)s');
 
     try {
+        await ctx.telegram.editMessageText(ctx.chat.id, msg.message_id, undefined, "🔄 Fetching Meta-Data...");
+
+        let caption = "";
+
+        // Only fetch metadata for videos to create a caption
+        if (type === 'video') {
+            try {
+                const meta = await youtubedl(url, {
+                    dumpJson: true,
+                    noWarnings: true
+                });
+
+                const width = meta.width || 'Unknown';
+                const height = meta.height || 'Unknown';
+                const filesizeMB = meta.filesize ? (meta.filesize / (1024 * 1024)).toFixed(2) : 'Unknown';
+
+                caption = `📺 Resolution: ${width}x${height}\n📦 Size: ${filesizeMB} MB`;
+            } catch (e) {
+                // Ignore metadata errors
+            }
+        }
+
         await ctx.telegram.editMessageText(ctx.chat.id, msg.message_id, undefined, "🔄 Downloading...");
 
         const options = {
@@ -382,7 +381,8 @@ bot.action(/dl_(video|audio)\|(.+)/, async (ctx) => {
             options.extractAudio = true;
             options.audioFormat = 'mp3';
         } else {
-            options.format = 'best[ext=mp4]/best';
+            // Speed optimization: --format "mp4" priority flag
+            options.format = 'best[ext=mp4]/mp4/best';
         }
 
         await youtubedl(url, options);
@@ -400,7 +400,9 @@ bot.action(/dl_(video|audio)\|(.+)/, async (ctx) => {
             if (type === 'audio') {
                 await ctx.replyWithAudio({ source: downloadedFiles[0] });
             } else {
-                await ctx.replyWithVideo({ source: downloadedFiles[0] });
+                const videoOptions = { source: downloadedFiles[0] };
+                if (caption) videoOptions.caption = caption;
+                await ctx.replyWithVideo(videoOptions);
             }
         } else {
             // Multiple files (Slideshow)
@@ -412,12 +414,24 @@ bot.action(/dl_(video|audio)\|(.+)/, async (ctx) => {
             } else {
                 // Media group for photos/videos
                 let mediaGroup = [];
+                let isFirstItem = true;
+
                 for (const file of downloadedFiles) {
                     const ext = path.extname(file).toLowerCase();
+                    let mediaObj = null;
+
                     if (['.jpg', '.jpeg', '.png', '.webp'].includes(ext)) {
-                        mediaGroup.push({ type: 'photo', media: { source: file } });
+                        mediaObj = { type: 'photo', media: { source: file } };
                     } else if (['.mp4', '.mkv', '.webm'].includes(ext)) {
-                        mediaGroup.push({ type: 'video', media: { source: file } });
+                        mediaObj = { type: 'video', media: { source: file } };
+                    }
+
+                    if (mediaObj) {
+                        if (isFirstItem && caption) {
+                            mediaObj.caption = caption;
+                            isFirstItem = false;
+                        }
+                        mediaGroup.push(mediaObj);
                     }
                 }
 
@@ -438,6 +452,13 @@ bot.action(/dl_(video|audio)\|(.+)/, async (ctx) => {
         saveDB();
 
         await ctx.telegram.deleteMessage(ctx.chat.id, msg.message_id);
+
+        // Smart Cleaning: Delete original message after 60 seconds
+        if (originalMessageId) {
+            setTimeout(() => {
+                ctx.telegram.deleteMessage(ctx.chat.id, originalMessageId).catch(() => {});
+            }, 60000);
+        }
 
     } catch (error) {
         console.error("Download Error:", error);
