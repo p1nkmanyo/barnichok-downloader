@@ -374,18 +374,72 @@ bot.action(/dl_(video|audio)\|(.+)/, async (ctx) => {
             noWarnings: true,
             outtmpl: outputTemplate,
             yesPlaylist: true, // Allow downloading slideshows as multiple files
-            // yt-dlp generally downloads tiktok without watermark by default now
+            addHeader: ['User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36'],
+            noCheckCertificates: true,
+            preferFreeFormats: true,
+            youtubeSkipDashManifest: true,
+            mergeOutputFormat: 'mp4'
         };
 
         if (type === 'audio') {
             options.extractAudio = true;
             options.audioFormat = 'mp3';
+            delete options.mergeOutputFormat; // Don't merge audio to mp4
         } else {
             // Speed optimization: --format "mp4" priority flag
-            options.format = 'best[ext=mp4]/mp4/best';
+            options.format = 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best';
         }
 
-        await youtubedl(url, options);
+        try {
+            await youtubedl(url, options);
+        } catch (dlError) {
+            console.error("Initial download failed, trying fallback:", dlError);
+
+            // Slideshow Fallback
+            if (type === 'video') {
+                const meta = await youtubedl(url, {
+                    dumpJson: true,
+                    noWarnings: true,
+                    addHeader: options.addHeader,
+                    noCheckCertificates: true
+                });
+
+                // If it's a playlist or slideshow, we can extract entries
+                const entries = meta.entries || [meta];
+
+                let successCount = 0;
+                for (let i = 0; i < entries.length; i++) {
+                    const entry = entries[i];
+                    if (entry.url) {
+                        const fallbackUrl = entry.url;
+                        const ext = entry.ext || 'jpg'; // Default to jpg if unknown for fallback
+                        const fallbackPath = path.join(tempDir, `fallback_${i}.${ext}`);
+
+                        try {
+                            const res = await fetch(fallbackUrl, {
+                                headers: {
+                                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36'
+                                }
+                            });
+
+                            if (res.ok) {
+                                const buffer = await res.arrayBuffer();
+                                fs.writeFileSync(fallbackPath, Buffer.from(buffer));
+                                successCount++;
+                            }
+                        } catch (fetchErr) {
+                            console.error(`Fallback fetch failed for entry ${i}:`, fetchErr);
+                        }
+                    }
+                }
+
+                if (successCount === 0) {
+                     throw new Error("Fallback download failed as well.");
+                }
+            } else {
+                 throw dlError;
+            }
+        }
 
         const downloadedFiles = fs.readdirSync(tempDir).map(file => path.join(tempDir, file));
 
@@ -461,7 +515,7 @@ bot.action(/dl_(video|audio)\|(.+)/, async (ctx) => {
         }
 
     } catch (error) {
-        console.error("Download Error:", error);
+        console.error("EXACT Download Error:", error);
         await ctx.telegram.editMessageText(ctx.chat.id, msg.message_id, undefined, t.download_fail);
     } finally {
         // Cleanup
