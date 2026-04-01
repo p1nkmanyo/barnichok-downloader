@@ -48,8 +48,8 @@ const i18n = {
         check_sub_btn: "Check Subscription",
         sub_thanks: "Thanks for subscribing!",
         sub_fail: "You are not subscribed yet.",
-        profile_text: "ID: {id}\nRemaining Quota: {quota}\nInvited Friends: {refCount}",
-        invite_text: "Invite friends to get +3 daily downloads permanently!\nYour link: https://t.me/{botUsername}?start={id}",
+        profile_text: "ID: {id}\nPremium Status: Active\nInvited Friends: {refCount}",
+        invite_text: "Invite friends to support the bot!\nYour link: https://t.me/{botUsername}?start={id}",
         downloading: "⏳ Downloading video...",
         download_success: "✅ Download complete!",
         download_fail: "❌ Cannot download this link",
@@ -66,8 +66,8 @@ const i18n = {
         check_sub_btn: "Проверить подписку",
         sub_thanks: "Спасибо за подписку!",
         sub_fail: "Вы еще не подписались.",
-        profile_text: "ID: {id}\nОстаток квот: {quota}\nПриглашенные друзья: {refCount}",
-        invite_text: "Приглашайте друзей и получайте +3 загрузки навсегда!\nВаша ссылка: https://t.me/{botUsername}?start={id}",
+        profile_text: "ID: {id}\nПремиум Статус: Активен\nПриглашенные друзья: {refCount}",
+        invite_text: "Приглашайте друзей, чтобы поддержать бота!\nВаша ссылка: https://t.me/{botUsername}?start={id}",
         downloading: "⏳ Загрузка видео...",
         download_success: "✅ Загрузка завершена!",
         download_fail: "❌ Не удалось скачать по этой ссылке",
@@ -84,8 +84,8 @@ const i18n = {
         check_sub_btn: "Ստուգել բաժանորդագրությունը",
         sub_thanks: "Շնորհակալություն բաժանորդագրվելու համար:",
         sub_fail: "Դուք դեռ բաժանորդագրված չեք:",
-        profile_text: "ID: {id}\nՄնացած քվոտան: {quota}\nՀրավիրված ընկերներ: {refCount}",
-        invite_text: "Հրավիրեք ընկերներին և ստացեք +3 ներբեռնում:\nՁեր հղումը՝ https://t.me/{botUsername}?start={id}",
+        profile_text: "ID: {id}\nՊրեմիում կարգավիճակ: Ակտիվ\nՀրավիրված ընկերներ: {refCount}",
+        invite_text: "Հրավիրեք ընկերներին աջակցելու բոտին:\nՁեր հղումը՝ https://t.me/{botUsername}?start={id}",
         downloading: "⏳ Տեսանյութի ներբեռնում...",
         download_success: "✅ Ներբեռնումը ավարտված է",
         download_fail: "❌ Անհնար է ներբեռնել այս հղումը",
@@ -178,7 +178,6 @@ bot.start(async (ctx) => {
         // Handle referral
         if (payload && payload !== userId && db.users[payload]) {
             db.users[payload].referralCount += 1;
-            db.users[payload].quota += 3; // +3 permanent quota
         }
         saveDB();
     }
@@ -221,7 +220,6 @@ bot.hears(['👤 Profile', '👤 Профиль', '👤 Պրոֆիլ'], (ctx) =>
     const t = i18n[ctx.user.lang];
     const text = t.profile_text
         .replace('{id}', ctx.userId)
-        .replace('{quota}', ctx.user.quota)
         .replace('{refCount}', ctx.user.referralCount);
     ctx.reply(text);
 });
@@ -269,50 +267,21 @@ bot.on('text', async (ctx, next) => {
             return ctx.reply(t.subscribe_msg, subKeyboard);
         }
 
-        // Check quota
-        if (user.quota <= 0) {
-            return ctx.reply(t.quota_exceeded);
-        }
-
-        // Deduct quota
-        user.quota -= 1;
-        saveDB();
-
-        const msg = await ctx.reply(t.downloading);
-
         const urlMatch = text.match(/(https?:\/\/[^\s]+)/);
         if (!urlMatch) return;
         const url = urlMatch[0];
 
-        const tempFile = path.join(__dirname, `temp_${ctx.userId}_${Date.now()}.mp4`);
+        // Cache URL to avoid callback_data 64-byte limit
+        const linkId = Math.random().toString(36).substring(2, 10);
+        if (!globalDB.links) globalDB.links = {};
+        globalDB.links[linkId] = url;
+        saveDB();
 
-        try {
-            await youtubedl(url, {
-                maxFilesize: '50M',
-                format: 'best',
-                output: tempFile
-            });
-
-            if (fs.existsSync(tempFile)) {
-                await ctx.replyWithVideo({ source: tempFile });
-                fs.unlinkSync(tempFile);
-
-                // Update stats
-                ctx.db.stats.totalDownloadedVideos = (ctx.db.stats.totalDownloadedVideos || 0) + 1;
-                saveDB();
-
-                await ctx.telegram.deleteMessage(ctx.chat.id, msg.message_id);
-            } else {
-                throw new Error("File not found");
-            }
-        } catch (error) {
-            if (fs.existsSync(tempFile)) fs.unlinkSync(tempFile);
-            await ctx.telegram.editMessageText(ctx.chat.id, msg.message_id, undefined, t.download_fail);
-
-            // Refund quota
-            user.quota += 1;
-            saveDB();
-        }
+        // Format Selection
+        const formatKeyboard = Markup.inlineKeyboard([
+            [Markup.button.callback('🎬 Video', `dl_video|${linkId}`), Markup.button.callback('🎵 MP3 Audio', `dl_audio|${linkId}`)]
+        ]);
+        return ctx.reply("Select format:", formatKeyboard);
     } else {
         return next();
     }
@@ -330,6 +299,158 @@ bot.action('check_sub', async (ctx) => {
         await ctx.reply(t.mainMenu, getKeyboard(user.lang));
     } else {
         await ctx.answerCbQuery(t.sub_fail, { show_alert: true });
+    }
+});
+
+bot.on('inline_query', async (ctx) => {
+    const query = ctx.inlineQuery.query.trim();
+    if (!query || (!query.includes('http://') && !query.includes('https://'))) {
+        return ctx.answerInlineQuery([]);
+    }
+
+    try {
+        const urlMatch = query.match(/(https?:\/\/[^\s]+)/);
+        if (!urlMatch) return ctx.answerInlineQuery([]);
+        const url = urlMatch[0];
+
+        // For inline query, we use the YouTube-dl exec output directly (get URL)
+        // to avoid downloading a 50MB file to the server for every inline search.
+        // However, yt-dlp can dump a direct video URL using -g / --get-url
+        const result = await youtubedl(url, {
+            dumpJson: true,
+            noWarnings: true,
+            maxFilesize: '50M',
+        });
+
+        let videoUrl = result.url;
+
+        // TikTok sometimes doesn't give a direct URL easily in dump-json, or it's short lived.
+        // But let's provide a basic InlineQueryResultVideo.
+
+        if (videoUrl) {
+            return ctx.answerInlineQuery([{
+                type: 'video',
+                id: String(Date.now()),
+                video_url: videoUrl,
+                mime_type: 'video/mp4',
+                thumb_url: result.thumbnail || 'https://via.placeholder.com/150',
+                title: result.title || 'Video',
+                description: 'Send video without watermark'
+            }], { cache_time: 0 });
+        } else {
+             return ctx.answerInlineQuery([]);
+        }
+
+    } catch (e) {
+        return ctx.answerInlineQuery([]);
+    }
+});
+
+// Download Action Handlers
+bot.action(/dl_(video|audio)\|(.+)/, async (ctx) => {
+    const type = ctx.match[1];
+    const linkId = ctx.match[2];
+    const url = globalDB.links ? globalDB.links[linkId] : null;
+
+    if (!url) {
+        return ctx.answerCbQuery("❌ Link expired or invalid.", { show_alert: true });
+    }
+
+    const user = ctx.user;
+    if (!user || !user.lang) return;
+    const t = i18n[user.lang];
+
+    await ctx.answerCbQuery();
+    const msg = await ctx.reply("⏳ Processing...");
+
+    const tempDir = path.join(__dirname, `temp_${ctx.userId}_${Date.now()}`);
+    fs.mkdirSync(tempDir, { recursive: true });
+    const outputTemplate = path.join(tempDir, '%(title)s.%(ext)s');
+
+    try {
+        await ctx.telegram.editMessageText(ctx.chat.id, msg.message_id, undefined, "🔄 Downloading...");
+
+        const options = {
+            maxFilesize: '50M',
+            noWarnings: true,
+            outtmpl: outputTemplate,
+            yesPlaylist: true, // Allow downloading slideshows as multiple files
+            // yt-dlp generally downloads tiktok without watermark by default now
+        };
+
+        if (type === 'audio') {
+            options.extractAudio = true;
+            options.audioFormat = 'mp3';
+        } else {
+            options.format = 'best[ext=mp4]/best';
+        }
+
+        await youtubedl(url, options);
+
+        const downloadedFiles = fs.readdirSync(tempDir).map(file => path.join(tempDir, file));
+
+        if (downloadedFiles.length === 0) {
+            throw new Error("No files downloaded.");
+        }
+
+        await ctx.telegram.editMessageText(ctx.chat.id, msg.message_id, undefined, "✅ Uploading...");
+
+        if (downloadedFiles.length === 1) {
+            // Single file
+            if (type === 'audio') {
+                await ctx.replyWithAudio({ source: downloadedFiles[0] });
+            } else {
+                await ctx.replyWithVideo({ source: downloadedFiles[0] });
+            }
+        } else {
+            // Multiple files (Slideshow)
+            if (type === 'audio') {
+                // If it's audio and multiple, just send them all
+                for (const file of downloadedFiles) {
+                    await ctx.replyWithAudio({ source: file });
+                }
+            } else {
+                // Media group for photos/videos
+                let mediaGroup = [];
+                for (const file of downloadedFiles) {
+                    const ext = path.extname(file).toLowerCase();
+                    if (['.jpg', '.jpeg', '.png', '.webp'].includes(ext)) {
+                        mediaGroup.push({ type: 'photo', media: { source: file } });
+                    } else if (['.mp4', '.mkv', '.webm'].includes(ext)) {
+                        mediaGroup.push({ type: 'video', media: { source: file } });
+                    }
+                }
+
+                // Telegram max media group size is 10
+                for (let i = 0; i < mediaGroup.length; i += 10) {
+                    await ctx.replyWithMediaGroup(mediaGroup.slice(i, i + 10));
+                }
+
+                // Also check if there's a separate audio file downloaded in the slideshow
+                const audioFiles = downloadedFiles.filter(f => f.endsWith('.mp3') || f.endsWith('.m4a'));
+                for (const file of audioFiles) {
+                    await ctx.replyWithAudio({ source: file });
+                }
+            }
+        }
+
+        ctx.db.stats.totalDownloadedVideos = (ctx.db.stats.totalDownloadedVideos || 0) + 1;
+        saveDB();
+
+        await ctx.telegram.deleteMessage(ctx.chat.id, msg.message_id);
+
+    } catch (error) {
+        console.error("Download Error:", error);
+        await ctx.telegram.editMessageText(ctx.chat.id, msg.message_id, undefined, t.download_fail);
+    } finally {
+        // Cleanup
+        try {
+            if (fs.existsSync(tempDir)) {
+                fs.rmSync(tempDir, { recursive: true, force: true });
+            }
+        } catch (e) {
+            console.error("Cleanup error:", e);
+        }
     }
 });
 
